@@ -11,6 +11,7 @@
 // Needs Node 20+ and the `playwright` package; the video also needs FFmpeg with libx264 on PATH. CHROME_PATH optionally
 // points at an installed Chrome. Everything is drawn by code; the only files written are the requested outputs.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -21,8 +22,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (x.startsWith('--') && a.push([x.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true]), a), []));
 const fps = Number(args.fps || 30);
 const { chromium } = createRequire(import.meta.url)(args.playwright || process.env.PLAYWRIGHT_MODULE || 'playwright');
-const MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const CHROME = process.env.CHROME_PATH || (fs.existsSync(MAC_CHROME) ? MAC_CHROME : undefined);
+// Playwright's own headless shell, never the owner's Google Chrome (a render must not open or lock it). CHROME_PATH picks another
+// browser. If this Playwright's matching shell isn't downloaded, the newest one in the Playwright cache is used.
+const HEADLESS_SHELL = (() => { try { const own = chromium.executablePath(); if (fs.existsSync(own)) return own; } catch {}
+  const cache = path.join(os.homedir(), 'Library/Caches/ms-playwright');
+  const builds = fs.existsSync(cache) ? fs.readdirSync(cache).filter(d => /^chromium_headless_shell-\d+$/.test(d)).sort((a, b) => b.split('-')[1] - a.split('-')[1]) : [];
+  for (const d of builds) { const exe = path.join(cache, d, 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell'); if (fs.existsSync(exe)) return exe; }
+  return undefined; })();
+const CHROME = process.env.CHROME_PATH || HEADLESS_SHELL;
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/png', '.jpg': 'image/jpeg', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
@@ -35,9 +42,12 @@ const server = http.createServer((req, res) => {
 await new Promise(ok => server.listen(0, '127.0.0.1', ok));
 const origin = `http://127.0.0.1:${server.address().port}`;
 
-// The 2D canvas runs in software: Chromium's GPU canvas can round blurs a level differently from run to run, and every frame
-// must come out identical however often it is rendered.
-const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ['--force-color-profile=srgb', '--disable-accelerated-2d-canvas'] });
+// The 2D canvas draws on the Mac's GPU (Metal): 3.4x faster than software, and a frame comes out byte-identical whether it is
+// rendered fresh or after earlier frames (checked Nov 2026). --cpu (or FILM_CPU=1, or any OS other than macOS) draws in software as before; GPU and software
+// frames differ slightly (SSIM 0.98), so compare like with like.
+const CPU = args.cpu === true || process.env.FILM_CPU === '1' || process.platform !== 'darwin';   // no Metal off macOS
+const GL_ARGS = CPU ? ['--disable-accelerated-2d-canvas'] : ['--use-angle=metal', '--enable-gpu-rasterization', '--ignore-gpu-blocklist'];
+const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ['--force-color-profile=srgb', ...GL_ARGS] });
 try {
   const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
   const errors = []; page.on('pageerror', e => errors.push(String(e))); page.on('console', m => m.type() === 'error' && errors.push(m.text()));
