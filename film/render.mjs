@@ -11,6 +11,7 @@
 // Needs Node 20+ and the `playwright` package; the video also needs FFmpeg with libx264 on PATH. CHROME_PATH optionally
 // points at an installed Chrome. Everything is drawn by code; the only files written are the requested outputs.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -21,8 +22,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (x.startsWith('--') && a.push([x.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : true]), a), []));
 const fps = Number(args.fps || 30);
 const { chromium } = createRequire(import.meta.url)(args.playwright || process.env.PLAYWRIGHT_MODULE || 'playwright');
-const MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const CHROME = process.env.CHROME_PATH || (fs.existsSync(MAC_CHROME) ? MAC_CHROME : undefined);
+// Playwright's own headless shell, never the owner's Google Chrome (a render must not open or lock it). CHROME_PATH picks another
+// browser. If this Playwright's matching shell isn't downloaded, the newest one in the Playwright cache is used.
+const HEADLESS_SHELL = (() => { try { const own = chromium.executablePath(); if (fs.existsSync(own)) return own; } catch {}
+  const cache = path.join(os.homedir(), 'Library/Caches/ms-playwright');
+  const builds = fs.existsSync(cache) ? fs.readdirSync(cache).filter(d => /^chromium_headless_shell-\d+$/.test(d)).sort((a, b) => b.split('-')[1] - a.split('-')[1]) : [];
+  for (const d of builds) { const exe = path.join(cache, d, 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell'); if (fs.existsSync(exe)) return exe; }
+  return undefined; })();
+const CHROME = process.env.CHROME_PATH || HEADLESS_SHELL;
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/png', '.jpg': 'image/jpeg', '.json': 'application/json' };
 const server = http.createServer((req, res) => {
